@@ -17,6 +17,7 @@ venv/
 
 # --- 数据文件（默认不入库；小文件可 git add -f data/xxx.csv） ---
 data/
+raw_questions/
 
 # --- OS / 编辑器 ---
 .DS_Store

@@ -12,3 +12,7 @@
 ## `AGENTS.md`的可选章节
 
 <reference>：引用
+
+## 文档解析
+
+使用 `scripts/mineru_parse.py` 将项目中的 PDF、Word 上传到 MinerU 精准解析 API，并下载 Markdown 与图片。默认使用 `vlm`，开启公式和表格识别。安装、Token 配置和运行方法见 [MinerU 使用说明](docs/mineru.md)。
