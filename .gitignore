@@ -1,0 +1,24 @@
+# --- 密钥 / 环境变量 ---
+.env
+*.key
+credentials*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# --- R ---
+.Rhistory
+.RData
+.Rproj.user/
+
+# --- 数据文件（默认不入库；小文件可 git add -f data/xxx.csv） ---
+data/
+
+# --- OS / 编辑器 ---
+.DS_Store
+Thumbs.db
+desktop.ini
