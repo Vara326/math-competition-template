@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
-import shutil
 import sys
 import tempfile
 import time
@@ -53,12 +52,6 @@ def api(method, route, token, payload=None):
     return result["data"]
 
 
-def save_state(path, state):
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
-
-
 def discover(inputs, output):
     files = set()
     for item in inputs:
@@ -85,7 +78,7 @@ def discover(inputs, output):
 
 def download(url, destination):
     # 在临时目录完成下载与校验，避免半成品被当作成功结果。
-    with tempfile.TemporaryDirectory(dir=destination) as scratch:
+    with tempfile.TemporaryDirectory() as scratch:
         scratch = Path(scratch)
         archive = scratch / "result.zip"
         with request("GET", url, stream=True) as response, archive.open("wb") as handle:
@@ -100,6 +93,7 @@ def download(url, destination):
                         or "\\" in member.filename or ":" in member.filename
                         or (member.external_attr >> 16) & 0o170000 == 0o120000):
                     raise ValueError("结果 ZIP 包含不安全路径。")
+            # 完整保留 MinerU 结果及目录结构，不按文件类型筛选。
             package.extractall(unpacked)
         markdown = list(unpacked.rglob("*.md"))
         if not markdown:
@@ -107,8 +101,12 @@ def download(url, destination):
         content = destination / "content"
         if content.exists():
             raise ValueError(f"结果目录已存在，请换一个输出目录：{content}")
-        unpacked.rename(content)
-        shutil.move(str(archive), destination / "result.zip")
+        # 临时文件可能位于另一磁盘；复制到输出旁的临时目录后原子发布。
+        import shutil
+        with tempfile.TemporaryDirectory(dir=destination) as staging:
+            staged = Path(staging) / "content"
+            shutil.copytree(unpacked, staged)
+            staged.rename(content)
     return [str(p.relative_to(unpacked)) for p in markdown]
 
 
@@ -121,33 +119,28 @@ def parse_file(source, options, token):
                                + str(options.ocr)).encode()).hexdigest()[:16]
     destination = options.output / f"{source.name}-{identity}"
     destination.mkdir(parents=True, exist_ok=True)
-    state_path = destination / "task.json"
-    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-    if state.get("markdown") and all((destination / "content" / p).is_file()
-                                     for p in state["markdown"]):
-        print(f"跳过已完成：{source}")
-        return
-    if not state.get("uploaded"):
-        data = api("POST", "/file-urls/batch", token, {
-            **config, "files": [{"name": source.name, "data_id": identity,
-                                   "is_ocr": options.ocr}]})
-        state = {"source": str(source), "sha256": digest, "config": config,
-                 "is_ocr": options.ocr, "batch_id": data["batch_id"], "uploaded": False}
-        save_state(state_path, state)
-        urls = data["file_urls"]
-        if len(urls) != 1:
-            raise RuntimeError("MinerU 返回的上传链接数量不正确。")
-        print(f"上传：{source.name}")
-        # 对象存储使用签名 URL，不携带 API Token，不设置 Content-Type。
-        with source.open("rb") as handle, request("PUT", urls[0], data=handle):
-            pass
-        state["uploaded"] = True
-        save_state(state_path, state)
-    print(f"等待解析：{source.name}（batch_id={state['batch_id']}）")
+    content = destination / "content"
+    if content.exists():
+        if any(content.rglob("*.md")):
+            print(f"跳过已完成：{source}")
+            return
+        raise ValueError(f"结果目录中没有 Markdown，请换一个 --output 目录：{content}")
+    data = api("POST", "/file-urls/batch", token, {
+        **config, "files": [{"name": source.name, "data_id": identity,
+                               "is_ocr": options.ocr}]})
+    batch_id = data["batch_id"]
+    urls = data["file_urls"]
+    if len(urls) != 1:
+        raise RuntimeError("MinerU 返回的上传链接数量不正确。")
+    print(f"上传：{source.name}")
+    # 对象存储使用签名 URL，不携带 API Token，不设置 Content-Type。
+    with source.open("rb") as handle, request("PUT", urls[0], data=handle):
+        pass
+    print(f"等待解析：{source.name}（batch_id={batch_id}）")
     deadline = time.monotonic() + options.wait_timeout
     previous = None
     while time.monotonic() < deadline:
-        data = api("GET", f"/extract-results/batch/{state['batch_id']}", token)
+        data = api("GET", f"/extract-results/batch/{batch_id}", token)
         results = data.get("extract_result", [])
         item = next((r for r in results if r.get("data_id") == identity), None)
         if item is None:
@@ -159,21 +152,20 @@ def parse_file(source, options, token):
         if status == "failed":
             raise RuntimeError(f"解析失败：{item.get('err_msg', '未知原因')}；"
                                "若为 Word 转换失败，请用 Word 导出 PDF 后重试。"
-                               "重新提交原文件可使用新的 --output 目录。")
+                               "可重新运行命令提交原文件。")
         if status == "done":
-            state["markdown"] = download(item["full_zip_url"], destination)
-            save_state(state_path, state)
-            for relative in state["markdown"]:
+            markdown = download(item["full_zip_url"], destination)
+            for relative in markdown:
                 print(f"已保存：{destination / 'content' / relative}")
             return
         time.sleep(min(options.poll_interval, max(0, deadline - time.monotonic())))
-    raise RuntimeError("等待解析超时；重新运行相同命令将继续查询已上传任务。")
+    raise RuntimeError("等待解析超时；重新运行相同命令会重新提交未完成的文件。")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("inputs", nargs="*", default=[str(ROOT)], help="文件或目录；默认递归扫描项目")
-    parser.add_argument("--output", type=Path, default=ROOT / "data" / "mineru", help="结果目录")
+    parser.add_argument("--output", type=Path, default=ROOT / "mineru", help="结果目录")
     parser.add_argument("--model", choices=["vlm", "pipeline"], default="vlm")
     parser.add_argument("--language", default="ch")
     parser.add_argument("--ocr", action="store_true", help="显式启动 OCR；用于扫描件或错误文本层")
@@ -214,5 +206,5 @@ if __name__ == "__main__":
         print(f"错误：{error}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\n已中断；重新运行可继续查询已上传任务。", file=sys.stderr)
+        print("\n已中断；重新运行会跳过已有结果，并重新提交未完成的文件。", file=sys.stderr)
         sys.exit(130)
