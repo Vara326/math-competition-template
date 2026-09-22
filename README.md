@@ -11,7 +11,7 @@
 
 ## `AGENTS.md`的可选章节
 
-<reference>：引用
+`<files>`：参考文件
 
 ## 文档解析
 
